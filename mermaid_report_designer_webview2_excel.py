@@ -68,7 +68,12 @@ OFFICE_CONST_FALLBACKS = {
     "msoShapeParallelogram": 2,
     "msoShapeDiamond": 4,
     "msoShapeRoundedRectangle": 5,
+    "msoShapeHexagon": 10,
+    "msoShapeOval": 9,
+    "msoShapeFlowchartDocument": 67,
     "msoShapeFlowchartTerminator": 69,
+    "msoShapeFlowchartPreparation": 70,
+    "msoShapeFlowchartPredefinedProcess": 65,
     "msoShapeFlowchartStoredData": 83,
     "msoConnectorStraight": 1,
     "msoConnectorElbow": 2,
@@ -1470,11 +1475,14 @@ class ParsedDiagram:
 
 SHAPE_PATTERN_ORDER: List[Tuple[str, str]] = [
     (r"^([A-Za-z][\w]*)\(\((.+)\)\)$", "terminator"),
-    (r"^([A-Za-z][\w]*)\{\{(.+)\}\}$", "decision"),
-    (r"^([A-Za-z][\w]*)\[(.+)\]$", "process"),
-    (r"^([A-Za-z][\w]*)\((.+)\)$", "terminator"),
+    (r"^([A-Za-z][\w]*)\[\((.+)\)\]$", "database"),
+    (r"^([A-Za-z][\w]*)\[\[(.+)\]\]$", "subprocess"),
     (r"^([A-Za-z][\w]*)\[\/(.+)\/\]$", "manual"),
     (r"^([A-Za-z][\w]*)\[\\(.+)\\\]$", "manual"),
+    (r"^([A-Za-z][\w]*)\{\{(.+)\}\}$", "decision"),
+    (r"^([A-Za-z][\w]*)\{(.+)\}$", "decision"),
+    (r"^([A-Za-z][\w]*)\[(.+)\]$", "process"),
+    (r"^([A-Za-z][\w]*)\((.+)\)$", "terminator"),
 ]
 
 EDGE_RE = re.compile(
@@ -2561,6 +2569,8 @@ class ExportNode:
     width: float = 150.0
     height: float = 60.0
     class_names: List[str] = field(default_factory=list)
+    is_junction: bool = False
+    junction_role: str = ""
 
 
 @dataclass
@@ -2703,24 +2713,33 @@ def normalize_label_for_shape(text: str, max_chars: int = 18) -> Tuple[str, floa
             current = word
     if current:
         lines.append(current)
-    if len(lines) == 1 and len(lines[0]) > max_chars:
+    if len(words) <= 1 and len(clean) > max_chars:
+        chunk_size = max(8, max_chars - 4)
+        lines = [clean[i:i + chunk_size] for i in range(0, len(clean), chunk_size)]
+    elif len(lines) == 1 and len(lines[0]) > max_chars:
         lines = [clean[i:i + max_chars] for i in range(0, len(clean), max_chars)]
     wrapped = "\n".join(lines[:4])
-    width = min(220.0, max(125.0, max(len(line) for line in lines[:4]) * 7.8 + 28.0))
-    height = max(54.0, 24.0 + len(lines[:4]) * 18.0)
+    width = min(260.0, max(150.0, max(len(line) for line in lines[:4]) * 10.5 + 34.0))
+    height = max(58.0, 24.0 + len(lines[:4]) * 20.0)
     return wrapped, width, height
 
 
 def infer_semantic_type(label: str, shape_kind: str, class_names: Sequence[str]) -> str:
     joined = f"{label} {' '.join(class_names)}".lower()
+    if "junction" in joined:
+        return "junction"
     if shape_kind == "decision" or any(word in joined for word in ["승인 여부", "결정", "판단", "여부", "분기"]):
         return "decision"
     if shape_kind == "terminator" or any(word in joined for word in ["시작", "종료", "완료", "오픈", "전환"]):
         return "start_end"
+    if any(word in joined for word in ["문서", "보고서", "report", "document"]):
+        return "document"
     if shape_kind in {"database"} or any(word in joined for word in ["db", "데이터", "저장", "storage", "database"]):
-        return "data"
-    if shape_kind in {"manual"} or any(word in joined for word in ["문서", "보고", "입력", "출력", "산출물"]):
-        return "data"
+        return "database"
+    if shape_kind in {"manual"} or any(word in joined for word in ["입력", "출력", "산출물", "작성", "전달"]):
+        return "manual_io"
+    if shape_kind in {"subprocess"} or any(word in joined for word in ["서브", "subprocess", "재검토", "재처리", "재수행"]):
+        return "subprocess"
     if any(word in joined for word in ["리스크", "위험", "이슈", "예외", "반려"]):
         return "risk"
     if any(word in joined for word in ["검토", "승인", "리뷰", "분석", "확인"]):
@@ -2731,10 +2750,18 @@ def infer_semantic_type(label: str, shape_kind: str, class_names: Sequence[str])
 
 
 def infer_excel_shape_name(node: ExportNode) -> str:
+    if node.is_junction or node.semantic_type == "junction":
+        return "msoShapeOval"
     if node.semantic_type == "start_end":
         return "msoShapeFlowchartTerminator"
     if node.semantic_type == "decision":
         return "msoShapeDiamond"
+    if node.semantic_type == "document":
+        return "msoShapeFlowchartDocument"
+    if node.semantic_type == "database":
+        return "msoShapeFlowchartStoredData"
+    if node.semantic_type == "manual_io":
+        return "msoShapeParallelogram"
     if node.semantic_type == "data":
         if any(word in node.label.lower() for word in ["문서", "보고", "report", "document"]):
             return "msoShapeFlowchartDocument"
@@ -2747,7 +2774,7 @@ def infer_excel_shape_name(node: ExportNode) -> str:
         return "msoShapeHexagon"
     if node.semantic_type == "done":
         return "msoShapeRoundedRectangle"
-    if any(word in node.label.lower() for word in ["하위", "subprocess", "재검토"]):
+    if node.semantic_type == "subprocess" or any(word in node.label.lower() for word in ["하위", "subprocess", "재검토"]):
         return "msoShapeFlowchartPredefinedProcess"
     return "msoShapeRoundedRectangle"
 
@@ -2805,15 +2832,19 @@ def parse_flowchart_for_export(code: str) -> ExportFlowchart:
             dst_id, dst_label, dst_kind = infer_shape_kind(right.strip())
             if src_id:
                 node = nodes.get(src_id) or ExportNode(src_id, src_label or src_id, src_kind or "process", "process", lane=current_lane)
-                node.label = src_label or node.label
-                node.shape_kind = src_kind or node.shape_kind
+                if src_label and not (src_label == src_id and src_kind == "process" and node.label != node.node_id):
+                    node.label = src_label
+                if src_kind and not (src_kind == "process" and node.shape_kind != "process"):
+                    node.shape_kind = src_kind
                 if current_lane and not node.lane:
                     node.lane = current_lane
                 nodes[src_id] = node
             if dst_id:
                 node = nodes.get(dst_id) or ExportNode(dst_id, dst_label or dst_id, dst_kind or "process", "process", lane=current_lane)
-                node.label = dst_label or node.label
-                node.shape_kind = dst_kind or node.shape_kind
+                if dst_label and not (dst_label == dst_id and dst_kind == "process" and node.label != node.node_id):
+                    node.label = dst_label
+                if dst_kind and not (dst_kind == "process" and node.shape_kind != "process"):
+                    node.shape_kind = dst_kind
                 if current_lane and not node.lane:
                     node.lane = current_lane
                 nodes[dst_id] = node
@@ -2830,9 +2861,116 @@ def parse_flowchart_for_export(code: str) -> ExportFlowchart:
         node.label = wrapped
         node.width = width
         node.height = height
+        if node.shape_kind == "decision":
+            node.width = max(node.width, 168.0)
+            node.height = max(node.height, 88.0)
+        elif node.shape_kind == "terminator":
+            node.width = max(node.width, 165.0)
+            node.height = max(node.height, 64.0)
+        elif node.shape_kind == "database":
+            node.width = max(node.width, 168.0)
+            node.height = max(node.height, 68.0)
+        elif node.shape_kind == "manual":
+            node.width = max(node.width, 162.0)
+            node.height = max(node.height, 64.0)
+        elif node.semantic_type in {"review", "subprocess"}:
+            node.width = max(node.width, 170.0)
+            node.height = max(node.height, 64.0)
+        else:
+            node.width = max(node.width, 160.0)
+            node.height = max(node.height, 62.0)
         if node.lane and node.lane not in lanes:
             lanes.append(node.lane)
     return ExportFlowchart(title=title, direction=direction, nodes=nodes, edges=edges, lanes=lanes)
+
+
+def augment_flowchart_with_junctions(diagram: ExportFlowchart) -> ExportFlowchart:
+    nodes = {
+        node_id: ExportNode(
+            node_id=node.node_id,
+            label=node.label,
+            shape_kind=node.shape_kind,
+            semantic_type=node.semantic_type,
+            lane=node.lane,
+            role=node.role,
+            width=node.width,
+            height=node.height,
+            class_names=list(node.class_names),
+            is_junction=node.is_junction,
+            junction_role=node.junction_role,
+        )
+        for node_id, node in diagram.nodes.items()
+    }
+    edges = [ExportEdge(edge.source, edge.target, edge.label) for edge in diagram.edges]
+    lanes = list(diagram.lanes)
+
+    outgoing: Dict[str, List[ExportEdge]] = {}
+    incoming: Dict[str, List[ExportEdge]] = {}
+    for edge in edges:
+        outgoing.setdefault(edge.source, []).append(edge)
+        incoming.setdefault(edge.target, []).append(edge)
+
+    split_nodes = [
+        node_id
+        for node_id, node in nodes.items()
+        if len(outgoing.get(node_id, [])) > 1 and (node.semantic_type == "decision" or len(outgoing.get(node_id, [])) >= 3)
+    ]
+    merge_nodes = [node_id for node_id in nodes if len(incoming.get(node_id, [])) > 1]
+
+    next_index = 1
+    for node_id in split_nodes:
+        junction_id = f"J_SPLIT_{next_index}"
+        next_index += 1
+        base_node = nodes[node_id]
+        nodes[junction_id] = ExportNode(
+            node_id=junction_id,
+            label="",
+            shape_kind="junction",
+            semantic_type="junction",
+            lane=base_node.lane,
+            width=12.0,
+            height=12.0,
+            is_junction=True,
+            junction_role="split",
+        )
+        original_edges = list(outgoing.get(node_id, []))
+        edges = [edge for edge in edges if edge.source != node_id]
+        edges.append(ExportEdge(node_id, junction_id, ""))
+        for edge in original_edges:
+            edges.append(ExportEdge(junction_id, edge.target, edge.label))
+
+    outgoing = {}
+    incoming = {}
+    for edge in edges:
+        outgoing.setdefault(edge.source, []).append(edge)
+        incoming.setdefault(edge.target, []).append(edge)
+
+    for node_id in merge_nodes:
+        if node_id not in nodes:
+            continue
+        node_incoming = list(incoming.get(node_id, []))
+        if len(node_incoming) <= 1:
+            continue
+        junction_id = f"J_MERGE_{next_index}"
+        next_index += 1
+        base_node = nodes[node_id]
+        nodes[junction_id] = ExportNode(
+            node_id=junction_id,
+            label="",
+            shape_kind="junction",
+            semantic_type="junction",
+            lane=base_node.lane,
+            width=12.0,
+            height=12.0,
+            is_junction=True,
+            junction_role="merge",
+        )
+        edges = [edge for edge in edges if edge.target != node_id]
+        for edge in node_incoming:
+            edges.append(ExportEdge(edge.source, junction_id, edge.label))
+        edges.append(ExportEdge(junction_id, node_id, ""))
+
+    return ExportFlowchart(title=diagram.title, direction=diagram.direction, nodes=nodes, edges=edges, lanes=lanes)
 
 
 def parse_gantt_for_export(code: str) -> GanttDiagram:
@@ -2992,14 +3130,17 @@ class ExcelExportHelper:
     def add_node(self, node: ExportNode, left: float, top: float, width: float, height: float) -> Any:
         shape_name = infer_excel_shape_name(node)
         shape = self.ws.Shapes.AddShape(self.office_const(shape_name), left, top, width, height)
-        fill, line, text = self.theme.semantic_colors.get(node.semantic_type, self.theme.semantic_colors["process"])
+        if node.is_junction:
+            fill, line, text = ("#FFFFFF", self.theme.connector, self.theme.connector)
+        else:
+            fill, line, text = self.theme.semantic_colors.get(node.semantic_type, self.theme.semantic_colors["process"])
         shape.Name = f"node_{node.node_id}"
         shape.TextFrame2.TextRange.Text = node.label
-        shape.TextFrame2.TextRange.Font.Size = 10.5
+        shape.TextFrame2.TextRange.Font.Size = 10.5 if not node.is_junction else 1
         shape.TextFrame2.TextRange.Font.Fill.ForeColor.RGB = hex_to_bgr_int(text)
         shape.Fill.ForeColor.RGB = hex_to_bgr_int(fill)
         shape.Line.ForeColor.RGB = hex_to_bgr_int(line)
-        shape.Line.Weight = 1.6
+        shape.Line.Weight = 1.6 if not node.is_junction else 1.2
         try:
             shape.TextFrame2.WordWrap = True
             shape.TextFrame2.AutoSize = False
@@ -3155,6 +3296,505 @@ class OrgChartExportStrategy(FlowchartExportStrategy):
 
 class SwimlaneExportStrategy(FlowchartExportStrategy):
     pass
+
+
+@dataclass
+class FlowExportLayout:
+    positions: Dict[str, Tuple[float, float, float, float]]
+    lane_bounds: Dict[str, Tuple[float, float, float, float]]
+    levels: Dict[str, int]
+    orders: Dict[str, int]
+    graph_bounds: Tuple[float, float, float, float]
+    horizontal: bool
+
+
+def _semantic_rank(node: ExportNode) -> int:
+    ranking = {
+        "start_end": 0,
+        "process": 1,
+        "review": 2,
+        "data": 3,
+        "decision": 4,
+        "risk": 5,
+        "done": 6,
+    }
+    return ranking.get(node.semantic_type, 9)
+
+
+def _build_flow_metrics(diagram: ExportFlowchart) -> Tuple[Dict[str, List[str]], Dict[str, List[str]], Dict[str, int], Dict[str, int]]:
+    incoming_counts = {nid: 0 for nid in diagram.nodes}
+    outgoing_counts = {nid: 0 for nid in diagram.nodes}
+    parents: Dict[str, List[str]] = {nid: [] for nid in diagram.nodes}
+    children: Dict[str, List[str]] = {nid: [] for nid in diagram.nodes}
+    for edge in diagram.edges:
+        if edge.source in outgoing_counts:
+            outgoing_counts[edge.source] += 1
+            children[edge.source].append(edge.target)
+        if edge.target in incoming_counts:
+            incoming_counts[edge.target] += 1
+            parents[edge.target].append(edge.source)
+    return parents, children, incoming_counts, outgoing_counts
+
+
+def compute_flowchart_export_layout(diagram: ExportFlowchart) -> FlowExportLayout:
+    nodes = diagram.nodes
+    if not nodes:
+        return FlowExportLayout({}, {}, {}, {}, (0.0, 0.0, 0.0, 0.0), False)
+
+    parents, children, incoming_counts, outgoing_counts = _build_flow_metrics(diagram)
+    roots = [nid for nid, count in incoming_counts.items() if count == 0] or [next(iter(nodes))]
+    levels = {nid: 0 for nid in roots}
+    queue_nodes = list(roots)
+    visited = set(roots)
+    while queue_nodes:
+        current = queue_nodes.pop(0)
+        for nxt in children.get(current, []):
+            if nxt not in visited:
+                levels[nxt] = levels[current] + 1
+                visited.add(nxt)
+                queue_nodes.append(nxt)
+    for nid in nodes:
+        levels.setdefault(nid, 0)
+
+    lane_names = list(diagram.lanes or [])
+    if not lane_names:
+        lane_names = ["Main"]
+    lane_index = {lane: idx for idx, lane in enumerate(lane_names)}
+    for node in nodes.values():
+        if not node.lane:
+            node.lane = lane_names[0]
+
+    level_groups: Dict[int, List[str]] = {}
+    for nid, level in levels.items():
+        level_groups.setdefault(level, []).append(nid)
+
+    orders: Dict[str, int] = {}
+    previous_orders: Dict[str, float] = {}
+    for level in sorted(level_groups):
+        ids = level_groups[level]
+
+        def sort_key(node_id: str) -> Tuple[float, int, int, str]:
+            parent_order = (
+                sum(previous_orders.get(parent, 0.0) for parent in parents[node_id]) / max(len(parents[node_id]), 1)
+                if parents[node_id]
+                else float(len(previous_orders) + lane_index.get(nodes[node_id].lane, 0))
+            )
+            return (
+                parent_order,
+                lane_index.get(nodes[node_id].lane, 0),
+                _semantic_rank(nodes[node_id]),
+                node_id,
+            )
+
+        ids.sort(key=sort_key)
+        for order, node_id in enumerate(ids):
+            orders[node_id] = order
+            previous_orders[node_id] = float(order)
+
+    horizontal = diagram.direction.upper() in {"LR", "RL"}
+    positions: Dict[str, Tuple[float, float, float, float]] = {}
+    lane_bounds: Dict[str, Tuple[float, float, float, float]] = {}
+    margin_x, margin_y = 56.0, 92.0
+    gap_x, gap_y = 64.0, 56.0
+    lane_gap = 34.0
+
+    if len(lane_names) > 1:
+        lane_width = 320.0
+        lane_height = 220.0
+        max_level = max(levels.values()) if levels else 0
+        if horizontal:
+            max_stack = max(
+                (sum(1 for nid in nodes if nodes[nid].lane == lane and levels[nid] == level) for lane in lane_names for level in range(max_level + 1)),
+                default=1,
+            )
+            dynamic_lane_height = lane_height + max(0, max_stack - 1) * 88.0
+            for lane, idx in lane_index.items():
+                lane_top = margin_y + idx * (dynamic_lane_height + lane_gap)
+                lane_bounds[lane] = (
+                    margin_x,
+                    lane_top,
+                    (max_level + 1) * (lane_width + gap_x),
+                    dynamic_lane_height,
+                )
+            grouped: Dict[Tuple[int, str], List[str]] = {}
+            for nid, node in nodes.items():
+                grouped.setdefault((levels[nid], node.lane), []).append(nid)
+            for ids in grouped.values():
+                ids.sort(key=lambda nid: (orders[nid], nid))
+            for (level, lane), ids in grouped.items():
+                x = margin_x + level * (lane_width + gap_x) + 30.0
+                y_start = lane_bounds[lane][1] + 54.0
+                for index, nid in enumerate(ids):
+                    node = nodes[nid]
+                    positions[nid] = (x, y_start + index * (node.height + gap_y), node.width, node.height)
+            total_width = margin_x + (max_level + 1) * (lane_width + gap_x)
+            total_height = max((bounds[1] + bounds[3] for bounds in lane_bounds.values()), default=0.0) + 48.0
+        else:
+            max_stack = max(
+                (sum(1 for nid in nodes if nodes[nid].lane == lane and levels[nid] == level) for lane in lane_names for level in range(max_level + 1)),
+                default=1,
+            )
+            dynamic_lane_width = lane_width + max(0, max_stack - 1) * 92.0
+            for lane, idx in lane_index.items():
+                lane_left = margin_x + idx * (dynamic_lane_width + lane_gap)
+                lane_bounds[lane] = (
+                    lane_left,
+                    margin_y,
+                    dynamic_lane_width,
+                    (max_level + 1) * (lane_height + gap_y),
+                )
+            grouped = {}
+            for nid, node in nodes.items():
+                grouped.setdefault((levels[nid], node.lane), []).append(nid)
+            for ids in grouped.values():
+                ids.sort(key=lambda nid: (orders[nid], nid))
+            for (level, lane), ids in grouped.items():
+                y = margin_y + level * (lane_height + gap_y) + 36.0
+                x_start = lane_bounds[lane][0] + 24.0
+                for index, nid in enumerate(ids):
+                    node = nodes[nid]
+                    positions[nid] = (x_start + index * (node.width + gap_x), y, node.width, node.height)
+            total_width = max((bounds[0] + bounds[2] for bounds in lane_bounds.values()), default=0.0) + 48.0
+            total_height = margin_y + (max_level + 1) * (lane_height + gap_y)
+    else:
+        max_level = max(levels.values()) if levels else 0
+        graph_left = margin_x
+        graph_top = margin_y
+        if horizontal:
+            graph_height = 0.0
+            for level in range(max_level + 1):
+                ids = sorted(level_groups.get(level, []), key=lambda nid: (orders[nid], nid))
+                top = graph_top + 36.0
+                max_right = 0.0
+                for idx, nid in enumerate(ids):
+                    node = nodes[nid]
+                    split_boost = 20.0 if outgoing_counts.get(nid, 0) > 1 else 0.0
+                    x = graph_left + level * (240.0 + gap_x) + split_boost
+                    y = top + idx * (node.height + gap_y)
+                    positions[nid] = (x, y, node.width, node.height)
+                    max_right = max(max_right, x + node.width)
+                    graph_height = max(graph_height, y + node.height + 32.0)
+            lane_bounds["Main"] = (graph_left - 18.0, graph_top - 22.0, max_right - graph_left + 52.0, graph_height - graph_top + 12.0)
+            total_width = max_right + 80.0
+            total_height = graph_height + 42.0
+        else:
+            level_widths: Dict[int, float] = {}
+            max_row_width = 0.0
+            min_canvas_width = 860.0
+            for level in range(max_level + 1):
+                ids = sorted(level_groups.get(level, []), key=lambda nid: (orders[nid], nid))
+                width = sum(nodes[nid].width for nid in ids) + max(0, len(ids) - 1) * gap_x
+                level_widths[level] = width
+                max_row_width = max(max_row_width, width)
+            max_row_width = max(max_row_width, min_canvas_width)
+            current_bottom = graph_top
+            max_right = graph_left
+            for level in range(max_level + 1):
+                ids = sorted(level_groups.get(level, []), key=lambda nid: (orders[nid], nid))
+                if not ids:
+                    current_bottom += 100.0
+                    continue
+                row_height = max(nodes[nid].height for nid in ids)
+                row_width = max(level_widths[level], 260.0)
+                x = graph_left + (max_row_width - row_width) / 2.0
+                row_extra = 26.0 if any(outgoing_counts.get(nid, 0) > 1 for nid in ids) else 0.0
+                y = current_bottom + row_extra
+                for nid in ids:
+                    node = nodes[nid]
+                    positions[nid] = (x, y, node.width, node.height)
+                    x += node.width + gap_x
+                    max_right = max(max_right, x)
+                current_bottom = y + row_height + gap_y
+            lane_bounds["Main"] = (graph_left - 18.0, graph_top - 22.0, max_row_width + 44.0, current_bottom - graph_top + 14.0)
+            total_width = graph_left + max_row_width + 80.0
+            total_height = current_bottom + 36.0
+
+    graph_bounds = (
+        min((bounds[0] for bounds in lane_bounds.values()), default=0.0),
+        min((bounds[1] for bounds in lane_bounds.values()), default=0.0),
+        total_width,
+        total_height,
+    )
+    return FlowExportLayout(positions, lane_bounds, levels, orders, graph_bounds, horizontal)
+
+
+def compute_augmented_flowchart_layout(base_diagram: ExportFlowchart, augmented_diagram: ExportFlowchart) -> FlowExportLayout:
+    base_layout = compute_flowchart_export_layout(base_diagram)
+    positions = dict(base_layout.positions)
+    lane_bounds = dict(base_layout.lane_bounds)
+
+    incoming: Dict[str, List[str]] = {}
+    outgoing: Dict[str, List[str]] = {}
+    for edge in augmented_diagram.edges:
+        incoming.setdefault(edge.target, []).append(edge.source)
+        outgoing.setdefault(edge.source, []).append(edge.target)
+
+    for node_id, node in augmented_diagram.nodes.items():
+        if not node.is_junction:
+            continue
+        parents = [pid for pid in incoming.get(node_id, []) if pid in positions]
+        children = [cid for cid in outgoing.get(node_id, []) if cid in positions]
+        if not parents and not children:
+            continue
+        ref_parent = positions[parents[0]] if parents else None
+        ref_child = positions[children[0]] if children else None
+        if base_layout.horizontal:
+            if node.junction_role == "split" and ref_parent is not None:
+                left = ref_parent[0] + ref_parent[2] + 24.0
+                top = ref_parent[1] + ref_parent[3] / 2.0 - node.height / 2.0
+            elif node.junction_role == "merge" and ref_child is not None:
+                left = ref_child[0] - 24.0 - node.width
+                top = ref_child[1] + ref_child[3] / 2.0 - node.height / 2.0
+            else:
+                base_ref = ref_parent or ref_child
+                left = base_ref[0] + 24.0
+                top = base_ref[1] + base_ref[3] / 2.0 - node.height / 2.0
+        else:
+            if node.junction_role == "split" and ref_parent is not None:
+                left = ref_parent[0] + ref_parent[2] / 2.0 - node.width / 2.0
+                top = ref_parent[1] + ref_parent[3] + 24.0
+            elif node.junction_role == "merge" and ref_child is not None:
+                left = ref_child[0] + ref_child[2] / 2.0 - node.width / 2.0
+                top = ref_child[1] - 24.0 - node.height
+            else:
+                base_ref = ref_parent or ref_child
+                left = base_ref[0] + base_ref[2] / 2.0 - node.width / 2.0
+                top = base_ref[1] + 24.0
+        positions[node_id] = (left, top, node.width, node.height)
+
+    all_left = [x for x, _, _, _ in positions.values()]
+    all_top = [y for _, y, _, _ in positions.values()]
+    all_right = [x + w for x, _, w, _ in positions.values()]
+    all_bottom = [y + h for _, y, _, h in positions.values()]
+    graph_bounds = (
+        min(all_left, default=0.0),
+        min(all_top, default=0.0),
+        max(all_right, default=0.0) - min(all_left, default=0.0) + 72.0,
+        max(all_bottom, default=0.0) - min(all_top, default=0.0) + 72.0,
+    )
+    return FlowExportLayout(positions, lane_bounds, dict(base_layout.levels), dict(base_layout.orders), graph_bounds, base_layout.horizontal)
+
+
+def _route_flowchart_edge_tb(
+    edge_index: int,
+    edge: ExportEdge,
+    layout: FlowExportLayout,
+    incoming_slot: int,
+    same_level_slot: int,
+    loop_slot: int,
+) -> List[Tuple[float, float]]:
+    sx, sy, sw, sh = layout.positions[edge.source]
+    tx, ty, tw, th = layout.positions[edge.target]
+    src_center_x = sx + sw / 2.0
+    src_center_y = sy + sh / 2.0
+    dst_center_x = tx + tw / 2.0
+    dst_center_y = ty + th / 2.0
+    src_level = layout.levels[edge.source]
+    dst_level = layout.levels[edge.target]
+    graph_left, _graph_top, graph_width, _graph_height = layout.graph_bounds
+    graph_right = graph_left + graph_width
+
+    if dst_level > src_level:
+        corridor_y = max(sy + sh + 22.0, ty - 26.0 - incoming_slot * 10.0)
+        if corridor_y >= ty - 12.0:
+            corridor_y = (sy + sh + ty) / 2.0
+        return [(src_center_x, corridor_y), (dst_center_x, corridor_y)]
+
+    if dst_level == src_level:
+        route_y = min(sy, ty) - 34.0 - same_level_slot * 18.0
+        return [(src_center_x, route_y), (dst_center_x, route_y)]
+
+    corridor_side_right = layout.orders[edge.target] > layout.orders[edge.source]
+    corridor_x = graph_right + 32.0 + loop_slot * 28.0 if corridor_side_right else graph_left - 32.0 - loop_slot * 28.0
+    entry_y = ty - 28.0 - incoming_slot * 8.0
+    return [(corridor_x, src_center_y), (corridor_x, entry_y), (dst_center_x, entry_y)]
+
+
+def _route_flowchart_edge_lr(
+    edge_index: int,
+    edge: ExportEdge,
+    layout: FlowExportLayout,
+    incoming_slot: int,
+    same_level_slot: int,
+    loop_slot: int,
+) -> List[Tuple[float, float]]:
+    sx, sy, sw, sh = layout.positions[edge.source]
+    tx, ty, tw, th = layout.positions[edge.target]
+    src_center_x = sx + sw / 2.0
+    src_center_y = sy + sh / 2.0
+    dst_center_x = tx + tw / 2.0
+    dst_center_y = ty + th / 2.0
+    src_level = layout.levels[edge.source]
+    dst_level = layout.levels[edge.target]
+    _graph_left, graph_top, _graph_width, graph_height = layout.graph_bounds
+    graph_bottom = graph_top + graph_height
+
+    if dst_level > src_level:
+        corridor_x = max(sx + sw + 22.0, tx - 30.0 - incoming_slot * 10.0)
+        if corridor_x >= tx - 14.0:
+            corridor_x = (sx + sw + tx) / 2.0
+        return [(corridor_x, src_center_y), (corridor_x, dst_center_y)]
+
+    if dst_level == src_level:
+        route_x = min(sx, tx) - 38.0 - same_level_slot * 18.0
+        return [(route_x, src_center_y), (route_x, dst_center_y)]
+
+    corridor_low = layout.orders[edge.target] >= layout.orders[edge.source]
+    corridor_y = graph_bottom + 28.0 + loop_slot * 26.0 if corridor_low else graph_top - 28.0 - loop_slot * 26.0
+    entry_x = tx - 28.0 - incoming_slot * 8.0
+    return [(src_center_x, corridor_y), (entry_x, corridor_y), (entry_x, dst_center_y)]
+
+
+def build_flowchart_routes(diagram: ExportFlowchart, layout: FlowExportLayout) -> List[List[Tuple[float, float]]]:
+    target_incoming_slots: Dict[str, int] = {}
+    same_level_slots: Dict[Tuple[str, str], int] = {}
+    loop_slots: Dict[Tuple[str, str], int] = {}
+    routes: List[List[Tuple[float, float]]] = []
+    for index, edge in enumerate(diagram.edges):
+        incoming_slot = target_incoming_slots.get(edge.target, 0)
+        target_incoming_slots[edge.target] = incoming_slot + 1
+        same_level_key = tuple(sorted((edge.source, edge.target)))
+        same_level_slot = same_level_slots.get(same_level_key, 0)
+        if layout.levels[edge.target] == layout.levels[edge.source]:
+            same_level_slots[same_level_key] = same_level_slot + 1
+        loop_key = (edge.source, edge.target)
+        loop_slot = loop_slots.get(loop_key, 0)
+        if layout.levels[edge.target] < layout.levels[edge.source]:
+            loop_slots[loop_key] = loop_slot + 1
+        if layout.horizontal:
+            routes.append(_route_flowchart_edge_lr(index, edge, layout, incoming_slot, same_level_slot, loop_slot))
+        else:
+            routes.append(_route_flowchart_edge_tb(index, edge, layout, incoming_slot, same_level_slot, loop_slot))
+    return routes
+
+
+def _helper_side_to_site(self, side: str) -> int:
+    return {
+        "top": 1,
+        "left": 2,
+        "bottom": 3,
+        "right": 4,
+    }.get(side, 3)
+
+
+def _helper_choose_side(shape: Any, point: Tuple[float, float]) -> str:
+    center_x = shape.Left + shape.Width / 2.0
+    center_y = shape.Top + shape.Height / 2.0
+    dx = point[0] - center_x
+    dy = point[1] - center_y
+    if abs(dx) >= abs(dy):
+        return "right" if dx >= 0 else "left"
+    return "bottom" if dy >= 0 else "top"
+
+
+def _helper_add_route_anchor(self, name: str, x: float, y: float, size: float = 3.6) -> Any:
+    anchor = self.ws.Shapes.AddShape(self.office_const("msoShapeRectangle"), x - size / 2.0, y - size / 2.0, size, size)
+    anchor.Name = name
+    anchor.Fill.Visible = False
+    anchor.Line.Visible = False
+    self.shape_map[name] = anchor
+    return anchor
+
+
+def _helper_connect_segment(self, start_obj: Any, start_side: str, end_obj: Any, end_side: str, name: str, arrow: bool = False) -> Any:
+    connector = self.ws.Shapes.AddConnector(self.office_const("msoConnectorStraight"), 0, 0, 10, 10)
+    connector.Name = name
+    connector.Line.ForeColor.RGB = hex_to_bgr_int(self.theme.connector)
+    connector.Line.Weight = 1.35
+    if arrow:
+        connector.Line.EndArrowheadStyle = self.office_const("msoArrowheadTriangle", "msoShapeRoundedRectangle")
+    connector.ConnectorFormat.BeginConnect(start_obj, self.side_to_site(start_side))
+    connector.ConnectorFormat.EndConnect(end_obj, self.side_to_site(end_side))
+    return connector
+
+
+def _helper_connect_shapes_routed(
+    self,
+    edge_key: str,
+    source_id: str,
+    target_id: str,
+    points: Sequence[Tuple[float, float]],
+    label: str = "",
+) -> None:
+    if source_id not in self.shape_map or target_id not in self.shape_map:
+        return
+    source_shape = self.shape_map[source_id]
+    target_shape = self.shape_map[target_id]
+    anchors: List[Any] = []
+    for index, (x, y) in enumerate(points):
+        anchors.append(self.add_route_anchor(f"{edge_key}_a{index}", x, y))
+
+    if anchors:
+        first_point = points[0]
+        self.connect_segment(
+            source_shape,
+            _helper_choose_side(source_shape, first_point),
+            anchors[0],
+            _helper_choose_side(anchors[0], (source_shape.Left + source_shape.Width / 2.0, source_shape.Top + source_shape.Height / 2.0)),
+            f"{edge_key}_seg0",
+        )
+        for index in range(len(anchors) - 1):
+            self.connect_segment(
+                anchors[index],
+                _helper_choose_side(anchors[index], points[index + 1]),
+                anchors[index + 1],
+                _helper_choose_side(anchors[index + 1], points[index]),
+                f"{edge_key}_seg{index + 1}",
+            )
+        last_anchor = anchors[-1]
+        self.connect_segment(
+            last_anchor,
+            _helper_choose_side(last_anchor, (target_shape.Left + target_shape.Width / 2.0, target_shape.Top + target_shape.Height / 2.0)),
+            target_shape,
+            _helper_choose_side(target_shape, points[-1]),
+            f"{edge_key}_seg_last",
+            arrow=True,
+        )
+        if label:
+            mid_x, mid_y = points[len(points) // 2]
+            self.add_label(label, mid_x, mid_y - 10.0)
+        return
+
+    src_center = (source_shape.Left + source_shape.Width / 2.0, source_shape.Top + source_shape.Height / 2.0)
+    dst_center = (target_shape.Left + target_shape.Width / 2.0, target_shape.Top + target_shape.Height / 2.0)
+    self.connect_segment(
+        source_shape,
+        _helper_choose_side(source_shape, dst_center),
+        target_shape,
+        _helper_choose_side(target_shape, src_center),
+        f"{edge_key}_direct",
+        arrow=True,
+    )
+    if label:
+        self.add_label(label, (src_center[0] + dst_center[0]) / 2.0, (src_center[1] + dst_center[1]) / 2.0 - 10.0)
+
+
+def _flowchart_strategy_export(self, workbook, code: str, theme_name: str, title: str) -> None:
+    ws = workbook.Worksheets(1)
+    ws.Name = "Flowchart"
+    theme = get_export_theme(theme_name)
+    diagram = parse_flowchart_for_export(code)
+    augmented = augment_flowchart_with_junctions(diagram)
+    helper = ExcelExportHelper(self.manager, workbook, ws, theme)
+    helper.add_title(diagram.title or title, f"Theme: {theme.name} / Junction layout")
+    layout = compute_augmented_flowchart_layout(diagram, augmented)
+    for lane, bounds in layout.lane_bounds.items():
+        helper.add_lane(lane, bounds[0], bounds[1], bounds[2], bounds[3])
+    for node_id, node in augmented.nodes.items():
+        left, top, width, height = layout.positions[node_id]
+        helper.add_node(node, left, top, width, height)
+    for edge in augmented.edges:
+        helper.connect_shapes(edge.source, edge.target, edge.label, augmented.direction)
+    self._add_legend(helper, ws, theme)
+    ws.Range("A:AZ").ColumnWidth = 2.4
+    ws.Range("1:240").RowHeight = 18
+
+
+ExcelExportHelper.side_to_site = _helper_side_to_site
+ExcelExportHelper.add_route_anchor = _helper_add_route_anchor
+ExcelExportHelper.connect_segment = _helper_connect_segment
+ExcelExportHelper.connect_shapes_routed = _helper_connect_shapes_routed
+FlowchartExportStrategy.export = _flowchart_strategy_export
 
 
 class GanttExportStrategy(ExcelExportStrategy):
